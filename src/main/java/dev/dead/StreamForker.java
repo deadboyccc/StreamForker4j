@@ -18,8 +18,6 @@ import java.util.stream.StreamSupport;
  * <p>
  * source.forEach ──► ForkingStreamConsumer ──► queue_i ──► BlockingQueueSpliterator_i ──► Stream_i ──► f_i ──► Future_i
  * <p>
- * Note: the class skeleton (fields, fork, getResults, Results) is not in the excerpt; it is
- * reconstructed from how the later listings use it.
  */
 public class StreamForker<T> {
 
@@ -80,7 +78,7 @@ public class StreamForker<T> {
         BlockingQueue<T> queue = new LinkedBlockingQueue<>();                // unbounded mailbox for this fork
         queues.add(queue);                                                   // the consumer will feed it
         Spliterator<T> spliterator = new BlockingQueueSpliterator<>(queue);  // pulls elements from the queue
-        Stream<T> source = StreamSupport.stream(spliterator, false);         // sequential Stream over the queue
+        Stream<T> source = StreamSupport.stream(spliterator, false);  // sequential Stream over the queue
         // Runs now, on a pool thread; it blocks on the (still empty) queue until elements are pushed.
         return CompletableFuture.supplyAsync(() -> f.apply(source));
     }
@@ -123,7 +121,7 @@ public class StreamForker<T> {
          */
         @SuppressWarnings("unchecked")
         void finish() {
-            accept((T) END_OF_STREAM);                // unchecked cast is safe: erased at runtime
+            accept((T) END_OF_STREAM); // unchecked cast is safe: erased at runtime
         }
 
         /**
@@ -164,7 +162,7 @@ public class StreamForker<T> {
                     t = q.take();                     // blocks until the producer pushes something
                     break;
                 } catch (InterruptedException _) {
-                }  // swallowed: this fork cannot be cancelled
+                }  // swallowed: this fork cannot be canceled
             }
             if (t != ForkingStreamConsumer.END_OF_STREAM) {
                 action.accept(t);                     // hand the element to the stream pipeline

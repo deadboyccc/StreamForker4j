@@ -5,7 +5,9 @@ import java.util.List;
 /**
  * Menu data model from Chapter 4, used by the demo.
  */
-public class Dish {
+public record Dish(String name, boolean vegetarian, int calories, Type type) {
+    public enum Type {MEAT, FISH, OTHER}
+
     public static final List<Dish> MENU = List.of(
             new Dish("pork", false, 800, Type.MEAT),
             new Dish("beef", false, 700, Type.MEAT),
@@ -16,38 +18,5 @@ public class Dish {
             new Dish("pizza", true, 550, Type.OTHER),
             new Dish("prawns", false, 300, Type.FISH),
             new Dish("salmon", false, 450, Type.FISH));
-    private final String name;
-    private final boolean vegetarian;
-    private final int calories;
-    private final Type type;
 
-    public Dish(String name, boolean vegetarian, int calories, Type type) {
-        this.name = name;
-        this.vegetarian = vegetarian;
-        this.calories = calories;
-        this.type = type;
-    }
-
-    public String getName() {
-        return name;
-    }
-
-    public boolean isVegetarian() {
-        return vegetarian;
-    }
-
-    public int getCalories() {
-        return calories;
-    }
-
-    public Type getType() {
-        return type;
-    }
-
-    @Override
-    public String toString() {
-        return name;
-    }
-
-    public enum Type {MEAT, FISH, OTHER}
 }
