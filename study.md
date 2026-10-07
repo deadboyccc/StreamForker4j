@@ -1,12 +1,14 @@
-# Forking a Stream: three implementations
+# Forking a Stream: four implementations
 
-One source stream, several results, one traversal. This document explains three ways to do it, each with a data-flow diagram, the full code, and a type-level walkthrough.
+One source stream, several results, one traversal. This document explains four ways to do it, each with a data-flow
+diagram, the full code, and a type-level walkthrough.
 
-| # | Method | Runs operations | Operation type |
-|---|---|---|---|
-| 1 | **Book `StreamForker`** (Modern Java in Action, Appendix C) | concurrently, one pool thread per operation | `Function<Stream<T>, ?>` |
-| 2 | **`MultiCollector`** (and the JDK's `Collectors.teeing`) | sequentially, in one pass, in the calling thread | `Collector<? super T, ?, R>` |
-| 3 | **Modern `StreamForker`** (JDK 25) | concurrently, one virtual thread per operation | `Function<Stream<T>, R>` |
+| # | Method                                                      | Runs operations                                                          | Operation type               |
+|---|-------------------------------------------------------------|--------------------------------------------------------------------------|------------------------------|
+| 1 | **Book `StreamForker`** (Modern Java in Action, Appendix C) | concurrently, one pool thread per operation                              | `Function<Stream<T>, ?>`     |
+| 2 | **`MultiCollector`** (and the JDK's `Collectors.teeing`)    | sequentially, in one pass, in the calling thread                         | `Collector<? super T, ?, R>` |
+| 3 | **Modern `StreamForker`** (JDK 25)                          | concurrently, one virtual thread per operation                           | `Function<Stream<T>, R>`     |
+| 4 | **Reactor `ReactiveStreamForker`**                          | reactive multicast; scheduling is controlled by the source and operators | `Function<Flux<T>, Mono<R>>` |
 
 > **Scope.** The book excerpt starts at Listing C.2. Listing C.1 (fields, `fork`, `getResults`, `Results`) is not in it and is reconstructed from how the later listings use it. All code in this document was compiled with `-Xlint:all` (no warnings) and run on **JDK 25**. Statements tagged **(measured)** come from those runs. The test machine had **1 vCPU**: timings show overhead, not parallel speed-up.
 
@@ -17,9 +19,10 @@ One source stream, several results, one traversal. This document explains three 
 3. [Method 1: Book StreamForker](#3-method-1-book-streamforker)
 4. [Method 2: MultiCollector](#4-method-2-multicollector)
 5. [Method 3: Modern StreamForker](#5-method-3-modern-streamforker)
-6. [Demo: all three side by side](#6-demo-all-three-side-by-side)
+6. [Demo: the stream and collector methods side by side](#6-demo-the-stream-and-collector-methods-side-by-side)
 7. [Comparison and choice](#7-comparison-and-choice)
 8. [Verification](#8-verification)
+9. [Method 4: Reactor ReactiveStreamForker](#9-method-4-reactor-reactivestreamforker)
 
 ---
 
@@ -1144,9 +1147,10 @@ A lambda returning `int` is boxed to `Integer` to match `Key<Integer>`.
 
 ---
 
-## 6. Demo: all three side by side
+## 6. Demo: the stream and collector methods side by side
 
-`Demo.java` computes the same four results with each method and compares them with `equals`.
+The project demo computes the same four results with the book, collector, modern, and Reactor methods and compares them
+with `equals`. The Reactor fork usage is shown in [section 9](#9-method-4-reactor-reactivestreamforker).
 
 ```java
 package forking;
@@ -1221,7 +1225,7 @@ public class Demo {
 }
 ```
 
-Output (measured):
+Output:
 
 ```
 Short menu:        pork, beef, chicken, french fries, rice, season fruit, pizza, prawns, salmon
@@ -1232,6 +1236,7 @@ Dishes by type:    {FISH=[prawns, salmon], OTHER=[french fries, rice, season fru
 method 1 (book)           == method 2 (MultiCollector): true
 method 2b (teeing)        == method 2 (MultiCollector): true
 method 3 (modern forker)  == method 2 (MultiCollector): true
+method 4 (Reactor)        == method 2 (MultiCollector): true
 ```
 
 Layout and commands (JDK 22+ is required because of the unnamed variable `_`; developed on JDK 25):
@@ -1255,20 +1260,20 @@ java -cp out forking.Demo
 
 ## 7. Comparison and choice
 
-| | Method 1: Book | Method 2: MultiCollector | Method 3: Modern |
-|---|---|---|---|
-| Passes over the source | 1 | 1 | 1 |
-| Operation type | `Function<Stream<T>, ?>` | `Collector` | `Function<Stream<T>, R>` |
-| Threads | common pool, one per fork | none (caller) | virtual thread per fork |
-| Parallelism kind | task (operations overlap) | data (parallel stream), or none | task (operations overlap) |
-| Parallel source stream | forced sequential | supported | forced sequential |
-| Memory | unbounded | collector state only | bounded buffer |
-| Back-pressure | none | not applicable | yes |
-| `null` elements | `NullPointerException` | depends on the collectors | supported |
-| Failure | late, wrapped, no cleanup | immediate, in the caller's thread | fail-fast, `CompletionException` with key |
-| Cancellation | no | not applicable | yes |
-| Result typing | unchecked (`ClassCastException`) | `Key<R>`, compile-time | `Key<R>`, compile-time |
-| Measured, 5M elements, 3 cheap operations | 1112 ms | 61 ms | 143 ms |
+|                                           | Method 1: Book                   | Method 2: MultiCollector          | Method 3: Modern                          | Method 4: Reactor                                              |
+|-------------------------------------------|----------------------------------|-----------------------------------|-------------------------------------------|----------------------------------------------------------------|
+| Passes per execution                      | 1                                | 1                                 | 1                                         | 1 upstream subscription                                        |
+| Operation type                            | `Function<Stream<T>, ?>`         | `Collector`                       | `Function<Stream<T>, R>`                  | `Function<Flux<T>, Mono<R>>`                                   |
+| Execution                                 | common-pool task per fork        | caller thread                     | virtual thread per fork                   | Reactor subscription; scheduler is opt-in                      |
+| Parallelism kind                          | task (operations overlap)        | data (parallel stream), or none   | task (operations overlap)                 | reactive demand; concurrency depends on source/operators       |
+| Parallel source                           | forced sequential                | supported                         | forced sequential                         | preserved as a `Flux`                                          |
+| Buffering                                 | unbounded queues                 | collector state only              | bounded queues, batched                   | Reactor `publish` coordinates demand; no app-level queue limit |
+| Back-pressure                             | none                             | not applicable                    | yes                                       | yes, through Reactive Streams demand                           |
+| `null` elements                           | `NullPointerException`           | depends on the collectors         | supported                                 | not supported by Reactor                                       |
+| Failure                                   | late, wrapped, no cleanup        | immediate, in the caller's thread | fail-fast, `CompletionException` with key | reactive error; an empty fork is also an error                 |
+| Cancellation                              | no                               | not applicable                    | yes                                       | subscription cancellation                                      |
+| Result typing                             | unchecked (`ClassCastException`) | `Key<R>`, compile-time            | `Key<R>`, compile-time                    | `Key<R>`, compile-time                                         |
+| Measured, 5M elements, 3 cheap operations | 1112 ms                          | 61 ms                             | 143 ms                                    | not benchmarked                                                |
 
 Reference point, same data: three separate traversals of the in-memory list took **21 ms**. (Median of 7 runs after warm-up, `-Xmx2g`, 1 vCPU, hand-written timing, not JMH. Use these as relative magnitudes only.)
 
@@ -1277,17 +1282,19 @@ How to read the numbers:
 - The book's per-element queue hand-off is roughly 8 times slower than the batched version and 50 times slower than re-streaming an in-memory list.
 - For **cheap operations on in-memory data**, re-streaming wins: it uses specialised primitive loops, while the generic collector path boxes and dispatches through lambdas.
 - Single-pass approaches pay off when **traversal is the expensive part** (file, network, cursor) or the source **cannot be replayed**. An in-memory list models neither.
-- Concurrent forking (Methods 1 and 3) can additionally use several cores when each operation is heavy. The 1-vCPU test machine could not show this.
+- Concurrent forking (Methods 1 and 3) can additionally use several cores when each operation is heavy. The 1-vCPU test
+  machine could not show this. Reactor does not move work to another thread by itself; scheduling must come from the
+  source or an operator such as `publishOn`.
 
 **Choosing**
 
-| Situation | Use |
-|---|---|
-| Source is cheap to re-stream (in-memory collection) | Stream it once per result. |
-| Single pass, two operations expressible as collectors | `Collectors.teeing` |
-| Single pass, N operations expressible as collectors | `MultiCollector` |
-| Single pass, heavy or I/O-bound operations, or operations collectors cannot express (`sorted`, `limit`, ...) | Modern `StreamForker` |
-| Existing reactive pipeline | Multicast the publisher (for example Reactor's `Flux.publish(Function)`; not run here) |
+| Situation                                                                                                    | Use                        |
+|--------------------------------------------------------------------------------------------------------------|----------------------------|
+| Source is cheap to re-stream (in-memory collection)                                                          | Stream it once per result. |
+| Single pass, two operations expressible as collectors                                                        | `Collectors.teeing`        |
+| Single pass, N operations expressible as collectors                                                          | `MultiCollector`           |
+| Single pass, heavy or I/O-bound operations, or operations collectors cannot express (`sorted`, `limit`, ...) | Modern `StreamForker`      |
+| Existing Reactor pipeline, with operations expressible as reactive pipelines                                 | `ReactiveStreamForker`     |
 
 **Other JDK 25 features considered**
 
@@ -1298,13 +1305,232 @@ How to read the numbers:
 
 ## 8. Verification
 
-| Item | Result |
-|---|---|
-| Book listings C.2 to C.5 plus reconstructed C.1 compile and run on JDK 25 | passed (`-Xlint:all`: no warnings) |
-| All three methods plus `teeing` return identical results for the shared example | passed |
-| `MultiCollector` on a parallel stream: combiner executed (15 calls on 2M elements), result equals sequential | passed |
-| Method 3 stress and failure suite (9 checks) | 9 of 9 passed |
-| Method 1 weaknesses (unbounded growth, early-terminating fork, `null`, late failure, thread behaviour) | reproduced |
-| Compile-time versus runtime type errors in Methods 1, 2 and 3 | reproduced (messages quoted in sections 3.6, 4.6, 5.7) |
-| Late binding, `estimateSize`, `characteristics`, standalone Spliterator demo | reproduced |
-| Not tested | Reactor `publish`; multi-core scaling |
+| Item                                                                                                         | Result                                                 |
+|--------------------------------------------------------------------------------------------------------------|--------------------------------------------------------|
+| Book listings C.2 to C.5 plus reconstructed C.1 compile and run on JDK 25                                    | passed (`-Xlint:all`: no warnings)                     |
+| All four methods plus `teeing` return identical results for the shared example                               | passed                                                 |
+| `MultiCollector` on a parallel stream: combiner executed (15 calls on 2M elements), result equals sequential | passed                                                 |
+| Method 3 stress and failure suite (9 checks)                                                                 | 9 of 9 passed                                          |
+| Reactor fork suite: one upstream subscription, short-circuit branch, empty-source optional and errors        | passed                                                 |
+| Method 1 weaknesses (unbounded growth, early-terminating fork, `null`, late failure, thread behaviour)       | reproduced                                             |
+| Compile-time versus runtime type errors in Methods 1, 2 and 3                                                | reproduced (messages quoted in sections 3.6, 4.6, 5.7) |
+| Late binding, `estimateSize`, `characteristics`, standalone Spliterator demo                                 | reproduced                                             |
+| Not tested                                                                                                   | multi-core scaling; Reactor throughput benchmarking    |
+
+---
+
+## 9. Method 4: Reactor ReactiveStreamForker
+
+This implementation is for a source that already belongs to a Reactor pipeline, or for an application that wants
+Reactive Streams demand and cancellation rather than a blocking `Stream` API. It multicasts one upstream subscription to
+several reactive operations with Reactor's `Flux.publish(Function)`.
+
+Unlike Methods 1 and 3, it creates no worker thread per operation. `publish` wires each operation to a shared `Flux`;
+the source and operators determine where signals execute. Use scheduler operators such as `publishOn` or `subscribeOn`
+when a branch needs a particular execution context.
+
+### 9.1 Data flow
+
+```mermaid
+flowchart LR
+    SRC["source Flux<T>"] --> PUB["publish(shared -> ...)"]
+    PUB -->|"same upstream subscription"| SHARED["shared Flux<T>"]
+    SHARED --> F1["operation 1: Flux<T> -> Mono<R1>"]
+    SHARED --> F2["operation 2: Flux<T> -> Mono<R2>"]
+    SHARED --> F3["operation 3: Flux<T> -> Mono<R3>"]
+    F1 --> ZIP["Mono.zip: wait for every result"]
+    F2 --> ZIP
+    F3 --> ZIP
+    ZIP --> RES["Mono<Results>"]
+```
+
+Each branch is a `Mono`, so it emits at most one result. `Mono.zip` subscribes to all the branches and combines their
+values. The shared publisher coordinates demand; a slow branch can slow upstream progress rather than allowing an
+application-owned unbounded per-fork queue to grow.
+
+### 9.2 Execution order
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as subscriber
+    participant RF as ReactiveStreamForker
+    participant P as publish selector
+    participant S as shared Flux
+    participant SRC as source
+    participant M1 as operation 1 Mono
+    participant M2 as operation 2 Mono
+    participant Z as zip coordinator
+
+    C->>RF: subscribe to run()
+    RF->>P: publish(shared -> zip(branches))
+    P->>M1: apply(shared)
+    P->>M2: apply(shared)
+    P->>S: subscribe branches
+    S->>SRC: subscribe once
+    loop source elements under downstream demand
+        SRC-->>S: onNext(t)
+        S-->>M1: onNext(t)
+        S-->>M2: onNext(t)
+    end
+    SRC-->>M1: onComplete
+    SRC-->>M2: onComplete
+    M1-->>Z: result 1
+    M2-->>Z: result 2
+    Z-->>C: emit Results
+```
+
+`run()` constructs a cold `Mono`: each subscription to that returned `Mono` runs the operation again and subscribes to
+the source once for that execution. It does not cache results between subscribers.
+
+### 9.3 Code
+
+The implementation lives in `src/main/java/dev/dead/reactor/ReactiveStreamForker.java`. Reactor Core is declared as
+`io.projectreactor:reactor-core` in `build.gradle.kts`.
+
+```java
+package dev.dead.reactor;
+
+import dev.dead.common.Key;
+import dev.dead.common.Results;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Function;
+
+/**
+ * Runs several reactive operations over ONE upstream subscription.
+ * Reactor's publish(Function) shares the source among the operations and coordinates demand.
+ */
+public final class ReactiveStreamForker<T> {
+
+    private final Flux<T> source;
+    private final Map<Key<?>, Function<Flux<T>, ? extends Mono<?>>> forks = new LinkedHashMap<>();
+
+    private ReactiveStreamForker(Flux<T> source) {
+        this.source = Objects.requireNonNull(source);
+    }
+
+    public static <T> ReactiveStreamForker<T> from(Flux<T> source) {
+        return new ReactiveStreamForker<>(source);
+    }
+
+    public <R> ReactiveStreamForker<T> fork(Key<R> key, Function<Flux<T>, Mono<R>> operation) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(operation, "operation");
+        if (forks.putIfAbsent(key, operation) != null) {
+            throw new IllegalArgumentException("Duplicate key '" + key + "'");
+        }
+        return this;
+    }
+
+    /**
+     * Returns a cold Mono that subscribes to the source once and emits all fork results.
+     * Each operation must produce exactly one result; use {@code Mono<Optional<R>>} when
+     * an operation can have no value.
+     */
+    public Mono<Results> run() {
+        var registered = new ArrayList<>(forks.entrySet());
+        if (registered.isEmpty()) {
+            return Mono.just(new Results(Map.of()));
+        }
+
+        return source.publish(shared -> {
+            var results = new ArrayList<Mono<?>>(registered.size());
+            for (var entry : registered) {
+                var key = entry.getKey();
+                var result = entry.getValue().apply(shared)
+                        .switchIfEmpty(Mono.error(
+                                new IllegalStateException("Fork '" + key + "' completed without a result")));
+                results.add(result);
+            }
+            return Mono.zip(results, values -> {
+                var collected = new LinkedHashMap<Key<?>, Object>();
+                for (int i = 0; i < registered.size(); i++) {
+                    collected.put(registered.get(i).getKey(), values[i]);
+                }
+                return new Results(collected);
+            });
+        }).single();
+    }
+}
+```
+
+Usage on the shared menu:
+
+```java
+Results results = ReactiveStreamForker.from(Flux.fromIterable(menu))
+    .fork(NAMES, s -> s.map(Dish::name).collectList()
+        .map(names -> String.join(", ", names)))
+    .fork(CALORIES, s -> s.map(Dish::calories).reduce(0, Integer::sum))
+    .fork(TOP, s -> s.reduce((a, b) -> byCalories.compare(a, b) >= 0 ? a : b)
+        .map(Optional::of).defaultIfEmpty(Optional.empty()))
+    .fork(BY_TYPE, s -> s.collect(groupingBy(Dish::type)))
+    .run()
+    .block(); // only the demo blocks; library callers can compose the Mono
+```
+
+The `TOP` operation wraps the possibly missing dish in `Optional`. That makes an empty source a valid result; without
+the wrapper, an empty `Mono` is treated as a missing fork result and fails.
+
+### 9.4 Walkthrough
+
+**`from(source)` and `fork(key, operation)`.** `from` captures a non-null `Flux<T>`. `fork` stores the typed key and
+operation in registration order and rejects duplicate keys. Each operation receives the shared `Flux<T>`, not an
+independently subscribed copy of the original source.
+
+**`run()`.** It snapshots the registered forks. For a nonempty set, the `publish` selector constructs every branch from
+the same shared flux, converts an empty branch into an error naming its key, and passes the resulting Monos to
+`Mono.zip`. When all branches produce values, the zipper associates each value with its key and builds the common
+immutable `Results`.
+
+**Errors and cancellation.** A source or operation error is delivered as a reactive error signal; there is no result bag
+on failure. `Mono.zip` cancels its other branches when it cannot produce a combined result. Cancelling the subscriber of
+`run()` propagates cancellation through the zip and shared publisher. The implementation does not wrap errors in a
+custom fork exception.
+
+**No forks.** The empty registration case returns an empty `Results` immediately and does not subscribe to the source.
+
+### 9.5 Types and result cardinality
+
+| Declaration                                         | Meaning                                                                               |
+|-----------------------------------------------------|---------------------------------------------------------------------------------------|
+| `ReactiveStreamForker<T>`                           | `T` is the source element type.                                                       |
+| `fork(Key<R>, Function<Flux<T>, Mono<R>>)`          | The key and Mono result share `R`; a mismatch is rejected by the compiler.            |
+| `Map<Key<?>, Function<Flux<T>, ? extends Mono<?>>>` | Storage erases the per-fork result type after `fork` has checked the association.     |
+| `Mono<Results> run()`                               | The complete set is emitted as one asynchronous result value.                         |
+| `Mono.zip(...)`                                     | Requires a value from every branch to construct the combined result.                  |
+| `Results.get(Key<R>)`                               | Typed retrieval, with the unchecked cast contained inside the common `Results` class. |
+
+Reactor does not permit `null` as an `onNext` value. A source element or fork result cannot be null; represent optional
+data explicitly, for example with `Mono<Optional<R>>`. An operation must produce one value for `run()` to succeed. If it
+can complete empty, map that case to an explicit optional or other domain result. If it completes empty without doing
+so, `run()` fails with `IllegalStateException("Fork '<key>' completed without a result")`.
+
+### 9.6 Properties and trade-offs
+
+| Property            | Reactor implementation                                                                             |
+|---------------------|----------------------------------------------------------------------------------------------------|
+| Source traversal    | One upstream subscription per subscription to `run()`                                              |
+| Operation model     | Reactive `Flux<T>` pipeline reduced to `Mono<R>`                                                   |
+| Threading           | No threads are created by the forker; scheduling is controlled by Reactor operators and the source |
+| Demand              | Coordinated by `publish`; downstream demand and slow branches affect upstream progress             |
+| Early-ending branch | Supported; for example, `flux.next()` can return while another branch counts the full source       |
+| Error handling      | Reactive error signal; missing branch values produce a keyed `IllegalStateException`               |
+| Cancellation        | Propagates through the reactive subscription                                                       |
+| Nulls               | Not supported by Reactor                                                                           |
+| Results             | Typed keys, immutable result map; registration order is retained                                   |
+| Empty fork set      | Emits empty `Results` without consuming the source                                                 |
+
+Do not call `block()` inside each fork: forks share the same reactive subscription, and blocking branch work can prevent
+the other branches from making progress. Compose non-blocking operators and place blocking work on an appropriate
+scheduler. The demo calls `block()` only at the outer boundary to print a synchronous comparison.
+
+This is not a drop-in replacement for the modern `StreamForker`: it does not guarantee one virtual thread per operation
+or provide an application-configured fixed queue bound. It fits reactive sources and consumers, where back-pressure and
+cancellation are part of the API contract.

@@ -1,4 +1,4 @@
-package dev.dead;
+package dev.dead.common;
 
 import java.util.List;
 
@@ -7,6 +7,11 @@ import java.util.List;
  */
 public record Dish(String name, boolean vegetarian, int calories, Type type) {
     public enum Type {MEAT, FISH, OTHER}
+
+    @Override
+    public String toString() {
+        return name;
+    }
 
     public static final List<Dish> MENU = List.of(
             new Dish("pork", false, 800, Type.MEAT),

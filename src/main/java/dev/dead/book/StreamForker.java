@@ -1,4 +1,4 @@
-package dev.dead;
+package dev.dead.book;
 
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
